@@ -18,7 +18,7 @@ if [ "${1:-}" = --build ] || [ "${1:-}" = --build-only ]; then
     read -r mod name <<< "$app"
     tools/build-app.sh "$mod" "$name" || { echo "build of $name failed"; exit 1; }
   done
-  vir/build.sh || { echo "lean-vir build failed"; exit 1; }
+  vir/build.sh bench life test || { echo "lean-vir build failed"; exit 1; }
   bench/race/build.sh || { echo "race page build failed"; exit 1; }
   roster/verify/build.sh || { echo "Roster verify page build failed"; exit 1; }
   [ "$1" = --build-only ] && exit 0
@@ -51,6 +51,7 @@ run keyed-dom node tests/browser/keyed-dom.mjs
 run fuzz node tests/browser/fuzz.mjs "$CORPUS/corpus.jsonl" both
 run templates node tests/browser/templates.mjs "$CORPUS/templates.jsonl" both
 run apply-semantics node tests/browser/apply-semantics.mjs
+run vir node tests/browser/vir.mjs
 run server node tests/browser/server.mjs all
 run effects node tests/browser/effects.mjs --no-build
 run bench-smoke-chromium node tests/browser/bench-smoke.mjs chromium

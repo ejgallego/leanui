@@ -167,8 +167,15 @@ built against. It was first written on 2026-10-18 from the research in
 | `examples/Video.lean` | the video lab: the editor's filters on every frame of a video | `leanui-editor-tests`, `tests/browser/video.mjs` |
 | `examples/Bench.lean`, `bench/*` | the benchmark app, the vanilla reference, the runner | `leanui-perf`, `tests/browser/{bench,selfbench,bench-smoke}.mjs` |
 | `examples/Life.lean`, `bench/race/*` | Game of Life on 1,000 cells; the race page (vanilla, wasm64, lean-vir side by side) | `leanui-kit-tests`, `tests/browser/race.mjs` |
-| `vir/*` | the benchmarked apps on lean-vir (Lean 4.35, apart from the main build; `vir/README.md`) | `tests/browser/race.mjs` |
+| `vir/*` | the benchmarked apps on lean-vir (Lean 4.36.0-rc1, apart from the main build; `vir/README.md`) | `tests/browser/race.mjs` |
 | `toolchain/*`, `tools/*` | wasm64 archives, app builds, site data | |
+
+`LeanUI.Runtime.dispose()` stops event and callback delivery, cancels owned timers, animation
+frames and fetches, removes listeners and revokes object URLs. The VIR transport additionally
+drops its session carrier and disposes its program. VIR startup failure runs the same cleanup;
+its terminal execution or DOM errors emit one `leanui:error` event after stopping the runtime.
+`tests/browser/vir.mjs` exercises that lifecycle, effects and copied-byte input/output against
+the pinned VIR interpreter in Chromium and Firefox.
 
 ## 5. Limits
 

@@ -33,6 +33,11 @@
       this.delegated = new Set();
       this.wanted = new Set();
       this.timers = new Map();
+      this.timeouts = new Set();
+      this.frames = new Set();
+      this.objectUrls = new Set();
+      this.effects = new AbortController();
+      this.onDelegatedEvent = (e) => this.onEvent(e);
       this.urlSub = 0;
       this.busy = false;
       this.queue = [];
@@ -40,7 +45,7 @@
       // commands that run at the end of the buffer that carries them (PUT_IMAGE: after the DOM
       // changes, while the pixels it reads are still valid)
       this.late = [];
-      // per blob index of the next buffer: [address, length] in wasm memory (LeanUI.__blob)
+      // Per blob index: [address, length] in wasm memory, or a copied byte view from VIR.
       this.blobs = [];
       // files the app was given (Payload.files), by id; the 64 most recent are kept
       this.files = new Map();
@@ -52,7 +57,7 @@
 
     // ---- input: events and effect results go to Lean one at a time ----
     send(kind, a, b, c, d) {
-      if (this.crashed) return;
+      if (this.disposed || this.crashed) return;
       if (this.busy) { this.queue.push([kind, a, b, c, d]); return; }
       this.busy = true;
       try {
@@ -67,12 +72,34 @@
     // thousand levels deep, or memory ran out) leaves the app without its state: say so once,
     // stop calling it, and tell the page (a "leanui:error" event on the container).
     crash(e) {
-      if (this.transport instanceof WasmTransport) {
+      if (this.transport instanceof WasmTransport || this.transport?.failed) {
+        if (this.disposed) return;
         this.crashed = e;
-        this.queue.length = 0;
+        const container = this.container;
+        try { this.dispose(); } catch (cleanup) { console.error("LeanUI: cleanup failed", cleanup); }
         console.error("LeanUI: the app stopped after an error in an update; reload the page to restart it.", e);
-        if (this.container) this.container.dispatchEvent(new CustomEvent("leanui:error", { bubbles: true, detail: e }));
+        if (container) container.dispatchEvent(new CustomEvent("leanui:error", { bubbles: true, detail: e }));
       } else console.error("LeanUI:", e);
+    }
+    // Stop browser work before releasing the transport, so late completions cannot reenter Lean.
+    dispose() {
+      if (this.disposed) return;
+      this.disposed = true;
+      this.effects.abort();
+      for (const t of this.timers.values()) clearInterval(t);
+      for (const t of this.timeouts) clearTimeout(t);
+      for (const f of this.frames) cancelAnimationFrame(f);
+      for (const url of this.objectUrls) URL.revokeObjectURL(url);
+      this.timers.clear(); this.timeouts.clear(); this.frames.clear(); this.objectUrls.clear();
+      this.queue.length = this.after.length = this.late.length = this.blobs.length = 0;
+      this.nodes.length = this.kinds.length = this.names.length = this.isClass.length = this.tpl.length = 0;
+      this.files.clear(); this.delegated.clear(); this.wanted.clear();
+      this.urlSub = this.keysSub = 0;
+      this.container = this.grabCanvas = null;
+      const transport = this.transport;
+      this.transport = null;
+      if (LeanUI.active === this) LeanUI.active = null;
+      transport?.dispose?.();
     }
     callback(cb, ok, payload) { this.send(1, cb, ok, payload); }
     // an effect's result with bytes (a Uint8Array or Uint8ClampedArray; null for none)
@@ -84,9 +111,9 @@
       this.wanted.add(type);
       if (!this.container || this.delegated.has(type)) return;
       this.delegated.add(type);
-      const opts = { capture: CAPTURE.has(type) };
+      const opts = { capture: CAPTURE.has(type), signal: this.effects.signal };
       if (ACTIVE.has(type)) opts.passive = false;
-      this.container.addEventListener(type, (e) => this.onEvent(e), opts);
+      this.container.addEventListener(type, this.onDelegatedEvent, opts);
     }
     onEvent(e) {
       const type = e.type;
@@ -109,6 +136,7 @@
 
     // ---- output: one command buffer per Lean update ----
     apply(bytes, opsOff, opsLen, strsOff, strsLen) {
+      if (this.disposed) return;
       const w = (opsOff & 3) === 0
         ? new Uint32Array(bytes.buffer, bytes.byteOffset + opsOff, opsLen >>> 2)
         : new Uint32Array(bytes.slice(opsOff, opsOff + opsLen).buffer);
@@ -119,7 +147,7 @@
       this.stats.flushes++; this.stats.ops += w.length; this.stats.bytes += opsLen + strsLen;
       let i = 0;
       const n = w.length;
-      while (i < n) {
+      while (i < n && !this.disposed) {
         switch (w[i]) {
           case 1: { const h = w[i + 1], ns = w[i + 2]; N[h] = ns ? document.createElementNS(NS[ns], names[w[i + 3]]) : document.createElement(names[w[i + 3]]); K[h] = ns; i += 4; break; }
           case 2: { const h = w[i + 1]; N[h] = document.createTextNode(S(i + 2)); K[h] = 3; i += 4; break; }
@@ -175,7 +203,7 @@
           case 20: i = this.template(w, i); break;
           case 21: i = this.clone(w, i); break;
           case 32: this.fetch(w[i + 1], S(i + 2), S(i + 4), S(i + 6), S(i + 8)); i += 10; break;
-          case 33: { const cb = w[i + 1]; setTimeout(() => this.callback(cb, true, ""), w[i + 2]); i += 3; break; }
+          case 33: { const cb = w[i + 1], t = setTimeout(() => { this.timeouts.delete(t); this.callback(cb, true, ""); }, w[i + 2]); this.timeouts.add(t); i += 3; break; }
           case 34: { const sub = w[i + 1]; this.timers.set(sub, setInterval(() => this.callback(sub, true, ""), w[i + 2])); i += 3; break; }
           case 35: { const sub = w[i + 1]; clearInterval(this.timers.get(sub)); this.timers.delete(sub); if (this.urlSub === sub) this.urlSub = 0; if (this.keysSub === sub) this.keysSub = 0; i += 2; break; }
           case 36: try { localStorage.setItem(S(i + 1), S(i + 3)); } catch (e) {} i += 5; break;
@@ -187,7 +215,7 @@
           case 42: { const sel = S(i + 1); this.after.push(() => { const el = document.querySelector(sel); if (el) el.focus(); }); i += 3; break; }
           case 43: console.log(S(i + 1)); i += 3; break;
           case 44: document.title = S(i + 1); i += 3; break;
-          case 45: { const cb = w[i + 1]; requestAnimationFrame((t) => this.callback(cb, true, String(Math.round(t)))); i += 2; break; }
+          case 45: { const cb = w[i + 1], f = requestAnimationFrame((t) => { this.frames.delete(f); this.callback(cb, true, String(Math.round(t))); }); this.frames.add(f); i += 2; break; }
           case 46: { const sel = S(i + 1); this.after.push(() => { const el = document.querySelector(sel); if (el) el.blur(); }); i += 3; break; }
           case 47: { const sel = S(i + 1); this.after.push(() => { const el = document.querySelector(sel); if (el) el.scrollIntoView({ block: "nearest" }); }); i += 3; break; }
           case 48: {
@@ -199,19 +227,23 @@
           case 51: this.download(S(i + 1), S(i + 3), this.blob(bytes, w[i + 5])); i += 6; break;
           case 52: this.listenKeys(w[i + 1]); i += 2; break;
           case 53: this.grabFrame(w[i + 1], S(i + 2)); i += 4; break;
-          case 54: { const cb = w[i + 1], f = this.files.get(w[i + 2]); const u = f ? URL.createObjectURL(f) : ""; queueMicrotask(() => this.callback(cb, !!f, u)); i += 3; break; }
+          case 54: { const cb = w[i + 1], f = this.files.get(w[i + 2]); const u = f ? this.objectUrl(f) : ""; queueMicrotask(() => this.callback(cb, !!f, u)); i += 3; break; }
           default: throw new Error("LeanUI: unknown opcode " + w[i] + " at word " + i);
         }
       }
-      if (this.late.length) { const a = this.late; this.late = []; a.forEach((f) => f()); }
+      if (this.disposed) return;
+      if (this.late.length) { const a = this.late; this.late = []; a.forEach((f) => { if (!this.disposed) f(); }); }
       this.blobs.length = 0;
-      if (this.after.length) { const a = this.after; this.after = []; queueMicrotask(() => a.forEach((f) => f())); }
+      if (this.after.length) { const a = this.after; this.after = []; queueMicrotask(() => a.forEach((f) => { if (!this.disposed) f(); })); }
     }
 
     setContainer(sel) {
       const c = document.querySelector(sel);
       if (!c) throw new Error("LeanUI: no element matches " + sel);
-      if (c !== this.container) { this.container = c; this.delegated.clear(); for (const t of this.wanted) this.delegate(t); }
+      if (c !== this.container) {
+        if (this.container) for (const t of this.delegated) this.container.removeEventListener(t, this.onDelegatedEvent, CAPTURE.has(t));
+        this.container = c; this.delegated.clear(); for (const t of this.wanted) this.delegate(t);
+      }
     }
 
     // Adopt server-rendered nodes: handles first .. first+count-1 in pre-order, skipping the
@@ -273,7 +305,7 @@
     fetch(cb, method, url, body, headerLines) {
       const headers = {};
       for (const line of headerLines.split("\n")) { const k = line.indexOf(": "); if (k > 0) headers[line.slice(0, k)] = line.slice(k + 2); }
-      const init = { method, headers };
+      const init = { method, headers, signal: this.effects.signal };
       if (method !== "GET" && method !== "HEAD") init.body = body;
       fetch(url, init)
         .then((r) => r.text().then((t) => this.callback(cb, r.ok, r.status + "\n" + t)))
@@ -281,10 +313,11 @@
     }
 
     // ---- pixels, files, keys ----
-    // Blob k of the buffer being applied, as a view of wasm memory (read it before returning to
-    // Lean, which may then free or reuse the bytes); null without one (a server-driven page).
+    // Blob k is a copied view (VIR) or an address in wasm memory. Consume the latter before
+    // returning to Lean, which may free or reuse the bytes; remote pages have no blobs.
     blob(bytes, k) {
       const b = this.blobs[k];
+      if (ArrayBuffer.isView(b)) return new Uint8ClampedArray(b.buffer, b.byteOffset, b.byteLength);
       return b ? new Uint8ClampedArray(bytes.buffer, bytes.byteOffset + b[0], b[1]) : null;
     }
     noBytes(what) {
@@ -308,11 +341,17 @@
     }
     download(name, type, b) {
       if (!b) return this.noBytes("DOWNLOAD");
-      const url = URL.createObjectURL(new Blob([b], { type }));   // Blob copies the bytes now
+      const url = this.objectUrl(new Blob([b], { type }));   // Blob copies the bytes now
       const a = document.createElement("a");
       a.href = url; a.download = name; a.style.display = "none";
       document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      const t = setTimeout(() => { this.timeouts.delete(t); this.objectUrls.delete(url); URL.revokeObjectURL(url); }, 30000);
+      this.timeouts.add(t);
+    }
+    objectUrl(blob) {
+      const url = URL.createObjectURL(blob);
+      this.objectUrls.add(url);
+      return url;
     }
     keepFiles(list) {
       const out = [];
@@ -354,8 +393,10 @@
         if (!v || !(v.readyState >= 2) || !v.videoWidth) throw new Error("no video frame");
         if (v.requestVideoFrameCallback && v.__leanuiFrameMs === undefined) {
           v.__leanuiFrameMs = -1;
-          const seen = (now, md) => { v.__leanuiFrameMs = Math.round(md.mediaTime * 1000); v.requestVideoFrameCallback(seen); };
-          v.requestVideoFrameCallback(seen);
+          let frame;
+          const seen = (now, md) => { if (this.disposed) return; v.__leanuiFrameMs = Math.round(md.mediaTime * 1000); frame = v.requestVideoFrameCallback(seen); };
+          frame = v.requestVideoFrameCallback(seen);
+          this.effects.signal.addEventListener("abort", () => { v.cancelVideoFrameCallback(frame); delete v.__leanuiFrameMs; }, { once: true });
         }
         const t = !v.paused && v.__leanuiFrameMs >= 0 ? v.__leanuiFrameMs : Math.round(v.currentTime * 1000);
         if (typeof VideoFrame === "function") { try { f = new VideoFrame(v); } catch (e) { f = null; } }
@@ -384,21 +425,21 @@
         if (!this.keysSub || e.isComposing || MODIFIER_KEYS.has(k)) return;
         if (t && (t.isContentEditable || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || (t.tagName === "INPUT" && !NOT_TEXT.has(t.type)))) return;
         this.callback(this.keysSub, true, (e.ctrlKey ? "Ctrl+" : "") + (e.altKey ? "Alt+" : "") + (e.shiftKey ? "Shift+" : "") + (e.metaKey ? "Meta+" : "") + k);
-      });
+      }, { signal: this.effects.signal });
     }
 
     listenUrl(sub) {
       this.urlSub = sub;
       if (this.urlListening) return;
       this.urlListening = true;
-      addEventListener("popstate", () => { if (this.urlSub) this.callback(this.urlSub, true, location.pathname + location.search + location.hash); });
+      addEventListener("popstate", () => { if (this.urlSub) this.callback(this.urlSub, true, location.pathname + location.search + location.hash); }, { signal: this.effects.signal });
       document.addEventListener("click", (e) => {
         const a = e.target.closest && e.target.closest("a[data-link]");
         if (!a || !this.urlSub || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
         e.preventDefault();
         history.pushState(null, "", a.getAttribute("href"));
         this.callback(this.urlSub, true, location.pathname + location.search + location.hash);
-      });
+      }, { signal: this.effects.signal });
     }
   }
 
@@ -461,15 +502,19 @@
   class RemoteTransport {
     constructor(endpoint, session, runtime) { this.endpoint = endpoint; this.session = session; this.rt = runtime; this.chain = Promise.resolve(); }
     post(body) {
-      this.chain = this.chain.then(() => fetch(this.endpoint + "/" + this.session, { method: "POST", body, headers: { "content-type": "text/plain" } }))
+      this.chain = this.chain.then(() => {
+        if (!this.rt.disposed) return fetch(this.endpoint + "/" + this.session, { method: "POST", body, headers: { "content-type": "text/plain" }, signal: this.rt.effects.signal });
+      })
         .then(async (r) => {
+          if (!r || this.rt.disposed) return;
           const buf = await r.arrayBuffer();
+          if (this.rt.disposed) return;
           if (r.status === 410) { this.expired(); return; }
           // a LeanUI server answers errors with a buffer that logs the reason: apply it either way
           if (!r.ok) console.error("LeanUI remote: HTTP " + r.status);
           if (buf.byteLength) applyEncoded(this.rt, new Uint8Array(buf));
         })
-        .catch((e) => console.error("LeanUI remote:", e));
+        .catch((e) => { if (!this.rt.disposed) console.error("LeanUI remote:", e); });
     }
     // The server forgot this session (it expired): reload once for a fresh one, never in a loop.
     expired() {
