@@ -26,7 +26,7 @@
     callbackBytes(cb, ok, payload, bytes) {
       this.call("callbackBytes", cb, ok, payload, new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
     }
-    get failed() { return this.broken || this.program?.status === "failed"; }
+    isTerminalError() { return this.broken || this.program?.status === "failed"; }
     dispose() {
       const program = this.program;
       this.program = this.session = null;
