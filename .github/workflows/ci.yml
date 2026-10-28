@@ -31,9 +31,8 @@ jobs:
 
       # Caches are restored and saved explicitly: actions/cache saves only when the whole job
       # succeeds, and the archives below take half an hour to rebuild.
-      # Two Lean releases: the main build's (lean-toolchain) and lean-vir's (vir/lean-toolchain),
-      # which the Roster notary and the QED64 lane also use (roster/notary/lean-toolchain,
-      # qed64/lean-toolchain); elan's lake runs the one its directory names.
+      # Separate Lean releases for the main build and VIR; the Roster notary and QED64 lane
+      # retain Lean 4.35. Elan's lake selects the toolchain named by each project directory.
       - name: Restore the Lean toolchains
         id: elan
         uses: actions/cache/restore@v6
@@ -369,8 +368,8 @@ jobs:
           lane=$(cd deploy/cloudflare/site/dist && ls race/qed64-rt/lean.*.wasm 2>/dev/null || true)
           cd "$RUNNER_TEMP"
           for path in assets/site/app.wasm editor/app.wasm $lane; do
-            for attempt in $(seq 1 20); do
-              got= want=
+            for _attempt in $(seq 1 20); do
+              got='' want=''
               if curl -sS --max-time 120 -D h -o b -H 'accept-encoding: br' "$url/$path"; then
                 want=$(grep -i '^etag:' h | sed -E 's/.*"([0-9]+)-.*-br".*/\1/' || true)
                 got=$(wc -c < b)
