@@ -45,7 +45,7 @@
       // commands that run at the end of the buffer that carries them (PUT_IMAGE: after the DOM
       // changes, while the pixels it reads are still valid)
       this.late = [];
-      // per blob index: [address, length] in wasm memory
+      // Per blob index: [address, length] in wasm memory, or a copied byte view from VIR.
       this.blobs = [];
       // files the app was given (Payload.files), by id; the 64 most recent are kept
       this.files = new Map();
@@ -345,10 +345,11 @@
     }
 
     // ---- pixels, files, keys ----
-    // Blob k of the buffer being applied, as a view of wasm memory (read it before returning to
-    // Lean, which may then free or reuse the bytes); null without one (a server-driven page).
+    // Blob k is a copied view (VIR) or an address in wasm memory. Consume the latter before
+    // returning to Lean, which may free or reuse the bytes; remote pages have no blobs.
     blob(bytes, k) {
       const b = this.blobs[k];
+      if (ArrayBuffer.isView(b)) return new Uint8ClampedArray(b.buffer, b.byteOffset, b.byteLength);
       return b ? new Uint8ClampedArray(bytes.buffer, bytes.byteOffset + b[0], b[1]) : null;
     }
     noBytes(what) {

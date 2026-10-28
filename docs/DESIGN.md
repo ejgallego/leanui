@@ -87,8 +87,8 @@ built against. It was first written on 2026-10-18 from the research in
 
 The in-page Wasm callbacks use the single `LeanUI.active` slot; one active app per page is
 supported. Starting another app does not dispose the previous one. Call `dispose()` before
-replacing a running app. The Wasm host uses the synchronous `Runtime.start(boot)` boundary
-once its module is loaded; `boot` must finish synchronously. It holds input until the initial
+replacing a running app. The Wasm and VIR hosts use the synchronous `Runtime.start(boot)`
+boundary after loading their backends; `boot` must finish synchronously. It holds input until the initial
 output is applied, then drains queued input. Failed startup disposes the new runtime and
 restores the previous live owner. If an error handler has installed a newer runtime,
 cleanup preserves that owner. This restores runtime ownership, not DOM changes already applied
@@ -108,7 +108,9 @@ and allows later input. Terminal errors dispose the
 runtime before emitting one `leanui:error` on its former container. An optional transport
 `dispose()` releases backend resources after browser work has stopped. Wasm drops its module
 reference (memory is reclaimed by JS garbage collection); a remote session expires on the
-server's normal timeout. QED64 terminates its Worker, detaches its callbacks and rejects pending
+server's normal timeout. VIR disposes its program and drops its session carrier. VIR call errors
+are recoverable while the program is active, and terminal when the program has failed or DOM
+application throws. QED64 terminates its Worker, detaches its callbacks and rejects pending
 `idle()` operations. Intentional disposal is quiet; cancellation rejects with `AbortError`, while
 a terminal failure preserves its original error and emits one `leanui:error` on a mounted container.
 
@@ -120,7 +122,8 @@ cancellation handle; callers must still account for a pending load when replacin
 `tests/browser/runtime-lifecycle.mjs` checks shared startup, disposal and async lifetime races
 without compiled apps in Chromium and Firefox. `tests/browser/qed-lifecycle.mjs` exercises the
 QED64 adapter with real browser Workers and a small protocol fixture; the full Lean interpreter
-and snapshot remain covered by `qed64/test/node.mjs` and the race suite.
+and snapshot remain covered by `qed64/test/node.mjs` and the race suite. `tests/browser/vir.mjs`
+checks the pinned VIR interpreter, effects and copied-byte input/output in both browsers.
 
 ## 2. Frozen interfaces (change only with a note in this file)
 
@@ -206,7 +209,7 @@ and snapshot remain covered by `qed64/test/node.mjs` and the race suite.
 | `examples/Video.lean` | the video lab: the editor's filters on every frame of a video | `leanui-editor-tests`, `tests/browser/video.mjs` |
 | `examples/Bench.lean`, `bench/*` | the benchmark app, the vanilla reference, the runner | `leanui-perf`, `tests/browser/{bench,selfbench,bench-smoke}.mjs` |
 | `examples/Life.lean`, `bench/race/*` | Game of Life on 1,000 cells; the race page (its lanes in `bench/race/lanes.mjs`: vanilla, wasm64, lean-vir side by side, and QED64 when asked for) | `leanui-kit-tests`, `tests/browser/race.mjs` |
-| `vir/*` | the benchmarked apps on lean-vir (Lean 4.35, apart from the main build; `vir/README.md`) | `tests/browser/race.mjs` |
+| `vir/*` | the benchmarked apps on lean-vir (Lean 4.36.0-rc1, apart from the main build; `vir/README.md`) | `tests/browser/race.mjs` |
 | `qed64/*` | the benchmarked apps on Lean's own interpreter in QED64's wasm64 Lean (Lean 4.35, apart from the main build; `qed64/README.md`) | `qed64/test/node.mjs`, `tests/browser/{race,qed-lifecycle}.mjs` |
 | `toolchain/*`, `tools/*` | wasm64 archives, app builds, site data | |
 

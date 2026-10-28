@@ -1,6 +1,6 @@
 # LeanUI apps on lean-vir (github.com/ejgallego/lean-vir), Lean's IR interpreter compiled to wasm32:
 # the second way to run LeanUI programs, kept for the benchmarks (vir/README.md). A project of its
-# own, apart from the main build: lean-vir pins one exact Lean release (4.35.0 here, while the main
+# own, apart from the main build: lean-vir pins one exact Lean release (4.36.0-rc1 here, while the main
 # build is on 4.34.0), and its build lives in vir/.lake. It compiles the main tree's sources.
 name = "leanui-vir"
 defaultTargets = ["publish"]
@@ -10,7 +10,7 @@ defaultTargets = ["publish"]
 [[require]]
 name = "lean_vir"
 git = "https://github.com/ejgallego/lean-vir"
-rev = "81de859a3ba1cb5da8bc5f128af025dd5a40b343"
+rev = "bf8b6a80a5d4011ffd6804fb7a395b9cd2d0d668"
 
 # LeanUI's core and the benchmarked programs, from the main tree
 [[lean_lib]]
@@ -26,7 +26,7 @@ roots = ["Bench", "Life"]
 # The lean-vir host and one entry module per app (the counterpart of examples/*App.lean)
 [[lean_lib]]
 name = "LeanUIVir"
-roots = ["LeanUIVir.Host", "LeanUIVir.BenchApp", "LeanUIVir.LifeApp"]
+roots = ["LeanUIVir.Host", "LeanUIVir.BenchApp", "LeanUIVir.LifeApp", "LeanUIVir.TestApp"]
 
 # Each app's packaged IR and the matching interpreter (lean-vir's resource workflow)
 [[lean_lib]]
@@ -38,6 +38,11 @@ needs = ["+LeanUIVir.BenchApp:virResourcePack"]
 name = "LifeResources"
 roots = ["LeanUIVir.LifeResources"]
 needs = ["+LeanUIVir.LifeApp:virResourcePack"]
+
+[[lean_lib]]
+name = "TestResources"
+roots = ["LeanUIVir.TestResources"]
+needs = ["+LeanUIVir.TestApp:virResourcePack"]
 
 # Writes an app's files for the browser: `lake exe publish bench ../dist/vir/bench`
 [[lean_exe]]

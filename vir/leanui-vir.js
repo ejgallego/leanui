@@ -6,22 +6,32 @@
   "use strict";
   const LeanUI = global.LeanUI;
 
-  // Each call into Lean returns the updates it made, each [u32 opsBytes][ops][strs] (the bytes a
-  // LeanUI server sends), as fresh Uint8Arrays (lean-vir copies byte arrays out of its memory), so
-  // Runtime.apply can read the words in place.
+  // Each update is [packet, ...blobs], all copied Uint8Arrays. The packet is the server's
+  // [u32 opsBytes][ops][strs] format; blob commands read the remaining arrays during apply.
   class VirTransport {
     constructor(program, app, session, rt) { this.program = program; this.app = app; this.session = session; this.rt = rt; }
     call(fn, ...args) { this.apply(this.program.call(this.app + "." + fn, this.session, ...args)); }
     apply(updates) {
-      for (const u of updates) {
-        const opsLen = (u[0] | (u[1] << 8) | (u[2] << 16) | (u[3] << 24)) >>> 0;
-        this.rt.apply(u, 4, opsLen, 4 + opsLen, u.length - 4 - opsLen);
-      }
+      try {
+        for (const [u, ...blobs] of updates) {
+          if (this.rt.disposed) return;
+          const opsLen = (u[0] | (u[1] << 8) | (u[2] << 16) | (u[3] << 24)) >>> 0;
+          this.rt.blobs = blobs;
+          this.rt.apply(u, 4, opsLen, 4 + opsLen, u.length - 4 - opsLen);
+        }
+      } catch (e) { this.broken = true; throw e; }
     }
     event(slot, payload) { this.call("event", slot, payload); }
     callback(cb, ok, payload) { this.call("callback", cb, ok, payload); }
-    // effects that answer with bytes (files, images) need the wasm64 host
-    callbackBytes(cb) { this.callback(cb, false, "bytes need the wasm64 host"); }
+    callbackBytes(cb, ok, payload, bytes) {
+      this.call("callbackBytes", cb, ok, payload, new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+    }
+    get failed() { return this.broken || this.program?.status === "failed"; }
+    dispose() {
+      const program = this.program;
+      this.program = this.session = null;
+      program?.dispose();
+    }
   }
 
   const LeanUIVir = {
@@ -39,14 +49,12 @@
         programManifestUrl: new URL(cfg.programManifest, url),
       });
       const rt = new LeanUI.Runtime(null);
-      LeanUI.active = rt;
-      rt.busy = true;
-      try {
+      rt.transport = new VirTransport(program, app, null, rt);
+      rt.start(() => {
         const session = program.call(app + ".start", flags, selector);
-        rt.transport = new VirTransport(program, app, session, rt);
+        rt.transport.session = session;
         rt.transport.apply(program.call(app + ".take", session));
-      } finally { rt.busy = false; }
-      if (rt.queue.length) { const [k, a, b, c, d] = rt.queue.shift(); rt.send(k, a, b, c, d); }
+      });
       rt.bootMs = performance.now() - t0;
       return rt;
     },

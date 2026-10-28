@@ -215,11 +215,18 @@ be done (another size, no canvas matching the selector, or no 2D context) is log
 with an empty rectangle does nothing. The canvas keeps its own
 size (`width` and `height` attributes, from the view).
 
+The VIR host carries an update as `[packet, ...blobs]`, where each element is a copied
+`Uint8Array` and `packet` uses the server's `[u32 opsBytes][ops][strs]` encoding. The shared
+applier reads these owned blob views with the same indices and lifetime as Wasm blobs. VIR
+copies bytes across its JS/Lean boundary; it does not expose a pointer into interpreter memory.
+
 Results with bytes (`FILE_READ`, `IMAGE_DECODE`, `FRAME_GRAB`) come back through a second callback,
 `callbackBytes(cb, ok, payload, bytes)`. In the wasm host the runtime asks the module for a Lean
 `ByteArray` of the right size (`leanui_bytes_alloc`, `leanui_bytes_data`), writes the bytes into
 it and passes it to `leanui_callback_bytes`, which hands it to Lean: one copy, from the browser's
-buffer into wasm memory, and none in Lean. A failure has `ok` = 0, the reason as the payload and
+buffer into wasm memory, and none in Lean. The VIR adapter passes a `Uint8Array` view to its
+exported IO `callbackBytes`; VIR copies it into a Lean `ByteArray`. Converting a browser
+`Uint8ClampedArray` to that view does not itself copy the pixels. A failure has `ok` = 0, the reason as the payload and
 no bytes; that includes a result too large for the module's memory (`leanui_bytes_alloc`
 returns null rather than stopping the program). `IMAGE_DECODE` decodes with `createImageBitmap` (no premultiplication, no colour space
 conversion) and reads the pixels back from a 2D canvas, so it decodes whatever the browser
@@ -232,7 +239,7 @@ same `timeMs` (`currentTime` moves between frames, and `VideoFrame.timestamp` is
 while it is paused, `currentTime` does (the last frame shown on pausing may get no callback).
 Where the conversion is missing, or the frame is rotated or flipped (`copyTo` copies the stored
 pixels), it draws the frame on a 2D canvas instead.
-`FILE_URL` replies with a string and works in either host.
+`FILE_URL` replies with a string and works in all three hosts.
 
 The server-driven host carries no bytes: its buffers have no blobs (`PUT_IMAGE` and `DOWNLOAD`
 are skipped, with one console warning), and a result with bytes arrives as an ordinary callback
