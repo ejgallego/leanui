@@ -455,11 +455,10 @@ async function runEngine(engine) {
   }, big);
   check("1 MB document reprints identically", perf.same, perf);
 
-  // ---- known core issue (reported, not counted): payloads cross into wasm as NUL-terminated C strings
-  // (runtime/leanui_wasm.c take_string → lean_mk_string), so everything after a U+0000 is lost.
+  // Raw NUL must reach Lean intact. Truncation would turn this invalid document into [1].
   const [nulC, , nulE] = (await runLab(["[1]\u0000[2]"]))[0];
-  const known = [{ issue: "event payloads are truncated at U+0000", reproduced: nulC === "[1]" && nulE === "",
-    detail: `"[1]\\u0000[2]" reads as ${JSON.stringify(nulC)} (should be rejected: data after the value)` }];
+  check("NUL in an event payload is preserved and rejected as trailing JSON data",
+    nulC === null && /after the JSON value/.test(nulE), { compact: nulC, error: nulE });
 
   // ---- second visit: the counter persists as JSON ----
   await page.goto(INDEX);
@@ -475,7 +474,7 @@ async function runEngine(engine) {
   const version = browser.version();
   await browser.close();
   const failed = checks.filter((c) => !c.ok);
-  return { engine, version, bootMs: Math.round(boot), labMs, bigDocument: perf, checks: checks.length, failed, stats, expectedNetwork: expectedNetwork.length, known };
+  return { engine, version, bootMs: Math.round(boot), labMs, bigDocument: perf, checks: checks.length, failed, stats, expectedNetwork: expectedNetwork.length };
 }
 
 const results = [];
@@ -487,7 +486,6 @@ console.log(JSON.stringify({ wasmBytes, results }, null, 1));
 for (const r of results) {
   console.log(`${r.engine} ${r.version}: ${r.checks - r.failed.length}/${r.checks} checks passed, boot ${r.bootMs} ms, JSON lab ${r.labMs} ms, ` +
     `${(r.bigDocument.bytes / 1e6).toFixed(2)} MB document ${r.bigDocument.leanMs} ms in LeanUI (JSON.parse+stringify: ${r.bigDocument.jsMs} ms)`);
-  for (const k of r.known) console.log(`  known core issue: ${k.issue}: ${k.reproduced ? "reproduced" : "not reproduced (fixed?)"} (${k.detail})`);
 }
 console.log(ok ? "PASS" : "FAIL");
 process.exit(ok ? 0 : 1);
