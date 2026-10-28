@@ -72,8 +72,8 @@
     // thousand levels deep, or memory ran out) leaves the app without its state: say so once,
     // stop calling it, and tell the page (a "leanui:error" event on the container).
     crash(e) {
-      if (this.transport?.failed) {
-        if (this.disposed) return;
+      if (this.disposed) return;
+      if (this.transport?.isTerminalError?.(e)) {
         this.crashed = e;
         const container = this.container;
         try { this.dispose(); } catch (cleanup) { console.error("LeanUI: cleanup failed", cleanup); }
@@ -143,6 +143,7 @@
       // events that do not bubble (delegated in the capture phase) reach only their target
       const bubbles = !CAPTURE.has(type);
       for (let n = e.target; n; n = n.parentNode) {
+        if (this.disposed) return;
         const hs = n.__lui;
         const h = hs && hs[type];
         if (h) {
@@ -150,6 +151,7 @@
           if (flags & 1) e.preventDefault();
           // flag 4: capture the pointer, so moves and the pointerup keep coming to this element
           if (flags & 4 && type === "pointerdown" && n.setPointerCapture) try { n.setPointerCapture(e.pointerId); } catch (x) {}
+          if (this.disposed) return;
           this.send(0, slot, extract(payload, n, e, this));
           if (flags & 2) { e.stopPropagation(); return; }
         }
@@ -172,7 +174,12 @@
       const n = w.length;
       while (i < n && !this.disposed) {
         switch (w[i]) {
-          case 1: { const h = w[i + 1], ns = w[i + 2]; N[h] = ns ? document.createElementNS(NS[ns], names[w[i + 3]]) : document.createElement(names[w[i + 3]]); K[h] = ns; i += 4; break; }
+          case 1: {
+            const h = w[i + 1], ns = w[i + 2];
+            const el = ns ? document.createElementNS(NS[ns], names[w[i + 3]]) : document.createElement(names[w[i + 3]]);
+            if (this.disposed) return;   // a custom-element constructor may dispose the owner
+            N[h] = el; K[h] = ns; i += 4; break;
+          }
           case 2: { const h = w[i + 1]; N[h] = document.createTextNode(S(i + 2)); K[h] = 3; i += 4; break; }
           case 3: {
             // On an HTML element, `className = v` is the same attribute write as
@@ -185,10 +192,10 @@
             i += 5; break;
           }
           case 4: N[w[i + 1]].removeAttribute(names[w[i + 2]]); i += 3; break;
-          case 5: { const el = N[w[i + 1]], k = names[w[i + 2]], v = S(i + 3); if (el[k] !== v) el[k] = v; i += 5; break; }
+          case 5: { const el = N[w[i + 1]], k = names[w[i + 2]], v = S(i + 3), old = el[k]; if (!this.disposed && old !== v) el[k] = v; i += 5; break; }
           case 6: N[w[i + 1]][names[w[i + 2]]] = w[i + 3] === 1; i += 4; break;
           case 7: N[w[i + 1]][names[w[i + 2]]] = Number(S(i + 3)); i += 5; break;
-          case 8: { const el = N[w[i + 1]], k = names[w[i + 2]]; el[k] = typeof el[k] === "boolean" ? false : ""; i += 3; break; }
+          case 8: { const el = N[w[i + 1]], k = names[w[i + 2]], v = typeof el[k] === "boolean" ? false : ""; if (!this.disposed) el[k] = v; i += 3; break; }
           case 9: N[w[i + 1]].nodeValue = S(i + 2); i += 4; break;
           case 10: N[w[i + 1]].appendChild(N[w[i + 2]]); i += 3; break;
           case 11: N[w[i + 1]].insertBefore(N[w[i + 2]], N[w[i + 3]]); i += 4; break;
@@ -213,7 +220,7 @@
               else break;
             }
             if (next === null) p.replaceChildren();
-            else for (let x = el; ; ) { const nx = x.nextSibling; x.remove(); if (x === last) break; x = nx; }
+            else for (let x = el; ; ) { const nx = x.nextSibling; x.remove(); if (this.disposed) return; if (x === last) break; x = nx; }
             break;
           }
           case 13: N[w[i + 1]].replaceWith(N[w[i + 2]]); i += 3; break;
@@ -221,8 +228,8 @@
           case 15: { const el = N[w[i + 1]], ev = names[w[i + 2]]; (el.__lui || (el.__lui = {}))[ev] = [w[i + 3], w[i + 4], w[i + 5]]; this.delegate(ev); i += 6; break; }
           case 16: { const el = N[w[i + 1]]; if (el.__lui) delete el.__lui[names[w[i + 2]]]; i += 3; break; }
           case 17: { const s = S(i + 2); names[w[i + 1]] = s; isClass[w[i + 1]] = s === "class"; i += 4; break; }
-          case 18: { this.setContainer(S(i + 1)); this.container.replaceChildren(N[w[i + 3]]); i += 4; break; }
-          case 19: { this.setContainer(S(i + 1)); this.hydrate(w[i + 3], w[i + 4]); i += 5; break; }
+          case 18: { this.setContainer(S(i + 1)); if (this.disposed) return; this.container.replaceChildren(N[w[i + 3]]); i += 4; break; }
+          case 19: { this.setContainer(S(i + 1)); if (this.disposed) return; this.hydrate(w[i + 3], w[i + 4]); i += 5; break; }
           case 20: i = this.template(w, i); break;
           case 21: i = this.clone(w, i); break;
           case 32: this.fetch(w[i + 1], S(i + 2), S(i + 4), S(i + 6), S(i + 8)); i += 10; break;
@@ -294,6 +301,7 @@
     // h1..hcount in pre-order (Lean sends it before any property or listener touches the subtree).
     template(w, i) {
       const tid = w[i + 1], count = w[i + 2], snap = this.nodes[w[i + 3]].cloneNode(true), moves = [];
+      if (this.disposed) return i + 3 + count;
       // each node's kind in pre-order (as in this.kinds: 0 HTML element, 1 other element, 3 text),
       // copied to the clone's handles so class writes keep their fast path
       const kind = (n) => (n.nodeType === 3 ? 3 : n.namespaceURI === HTML ? 0 : 1), kinds = [kind(snap)];
@@ -315,6 +323,7 @@
     clone(w, i) {
       const N = this.nodes, K = this.kinds, t = this.tpl[w[i + 1]], moves = t.moves, kinds = t.kinds, m = moves.length;
       let n = t.snap.cloneNode(true), k = i + 3;
+      if (this.disposed) return i + 3 + w[i + 2];
       K[w[k]] = kinds[0]; N[w[k++]] = n;
       for (let j = 0; j < m; j++) {
         const u = moves[j];
@@ -374,11 +383,13 @@
       this.timeouts.add(t);
     }
     objectUrl(blob) {
+      if (this.disposed) return "";
       const url = URL.createObjectURL(blob);
       this.objectUrls.add(url);
       return url;
     }
     keepFiles(list) {
+      if (this.disposed) return "";
       const out = [];
       for (const f of list) {
         const id = this.fileSeq++;
@@ -514,7 +525,7 @@
 
   class WasmTransport {
     constructor(mod) { this.mod = mod; }
-    get failed() { return true; }   // any thrown wasm update may have lost its Lean state
+    isTerminalError() { return true; }   // any thrown wasm update may have lost its Lean state
     dispose() { this.mod = null; }
     event(slot, payload) { this.mod._leanui_event(slot, ...utf8(this.mod, payload)); }
     callback(cb, ok, payload) { this.mod._leanui_callback(cb, ok ? 1 : 0, ...utf8(this.mod, payload)); }

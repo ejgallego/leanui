@@ -15,11 +15,12 @@
       this.worker = worker; this.rt = rt;
       this.out = 0;               // messages sent and not answered yet
       this.waiters = []; this.dead = null;
+      this.rejectMount = null;    // reject an unfinished mount when its Worker is stopped
       // since the mount: the replies, Lean's own time in them, the Worker's (from a message
       // reaching it to its reply leaving), applying them here, and the replies held up
       this.totals = { replies: 0, leanMs: 0, workerMs: 0, applyMs: 0, stalls: 0 };
     }
-    post(m, transfer) { if (this.dead) return; this.out++; this.worker.postMessage(m, transfer || []); }
+    post(m, transfer) { if (this.dead || this.rt.disposed) return; this.out++; this.worker.postMessage(m, transfer || []); }
     send(head, payload) { const body = enc.encode(payload); this.post({ type: "msg", head, body }, [body.buffer]); }
     event(slot, payload) { this.send("e " + slot, payload); }
     callback(cb, ok, payload) { this.send("c " + cb + " " + (ok ? 1 : 0), payload); }
@@ -29,14 +30,16 @@
     // each update is [u32 opsBytes][ops][strs] in a buffer of its own
     apply(updates) {
       for (const b of updates) {
+        if (this.rt.disposed) return;
         const u = new Uint8Array(b), opsLen = (u[0] | (u[1] << 8) | (u[2] << 16) | (u[3] << 24)) >>> 0;
         this.rt.apply(u, 4, opsLen, 4 + opsLen, u.length - 4 - opsLen);
       }
     }
     onReply(m) {
-      if (this.dead) return;
+      if (this.dead || this.rt.disposed) return;
       const t0 = now();
       try { this.apply(m.updates); } catch (e) { return this.die(e); }
+      if (this.dead || this.rt.disposed) return;
       const t = this.totals;
       t.replies++; t.leanMs += m.leanNs / 1e6; t.workerMs += m.workerMs; t.applyMs += now() - t0; if (m.stall) t.stalls++;
       if (m.errors.length) console.warn("LeanUI (QED64): the host could not read a message:", m.errors.join("; "));
@@ -48,16 +51,26 @@
     /** A promise that resolves once every message sent so far has been answered and applied, and
         rejects if the app has stopped. */
     idle() { return this.dead ? Promise.reject(this.dead) : this.out ? new Promise((ok, no) => this.waiters.push([ok, no])) : Promise.resolve(); }
-    // Lean stopped (it exited, lean.wasm aborted, or an update could not be applied): say so once,
-    // and tell the page (a "leanui:error" event on the container)
+    isTerminalError() { return true; }
+    // Explicit disposal is quiet; a terminal error keeps its original reason for waiters.
+    dispose() {
+      const worker = this.worker;
+      if (!worker) return;
+      this.worker = null;
+      this.dead ||= new DOMException("The app was disposed", "AbortError");
+      this.out = 0;
+      const rejectMount = this.rejectMount;
+      this.rejectMount = null;
+      this.settle(this.dead);
+      rejectMount?.(this.dead);
+      worker.onmessage = worker.onerror = null;
+      worker.terminate();
+    }
+    // All terminal paths share the Runtime's cleanup and single error notification.
     die(e) {
-      if (this.dead) return;
+      if (this.dead || this.rt.disposed) return;
       this.dead = e;
-      this.worker.terminate();     // its memory and its pthreads' go with it
-      console.error("LeanUI (QED64): the app stopped:", e);
-      const c = this.rt.container;
-      if (c) c.dispatchEvent(new CustomEvent("leanui:error", { bubbles: true, detail: e }));
-      this.settle(e);
+      this.rt.crash(e);
     }
   }
 
@@ -79,54 +92,70 @@
       const cfg = await res.json();
       const file = (f) => new URL(f, new URL(cfg.rt, url)).href;
       const rt = new LeanUI.Runtime(null);
+      const previous = LeanUI.active;
+      // Worker startup spans awaits; rollback stays installed only until readiness settles.
+      const rollback = () => { if (LeanUI.active === rt) LeanUI.active = previous?.disposed ? null : previous; };
+      rt.effects.signal.addEventListener("abort", rollback, { once: true });
       LeanUI.active = rt;
-      const box = document.querySelector(selector);
-      const say = (s) => { if (box && !rt.container) box.textContent = "Lean's interpreter on QED64: " + s + "…"; };
-      const worker = new Worker(file(cfg.worker));
-      const tr = new QedTransport(worker, rt);
-      rt.transport = tr;
-      // the start's milestones, on this page's clock (the Worker's are moved onto it)
-      const at = {};
-      let bytes = 0;
-      say("downloading lean.wasm and the snapshot");
-      const mount = new Promise((ok, no) => {
-        const fail = (err) => { tr.die(err); no(err); };
-        worker.onmessage = (e) => {
-          const m = e.data;
-          if (m.type === "reply" && !m.mount) tr.onReply(m);
-          else if (m.type === "reply") {
-            rt.busy = true;
-            try { tr.apply(m.updates); } catch (err) { return fail(err); } finally { rt.busy = false; }
-            at.applied = now(); bytes = m.bytes; ok();
-          } else if (m.type === "phase") {
-            at[m.name] = m.at - performance.timeOrigin;
-            if (m.name !== "mounted") say(m.name === "downloaded" ? "starting lean.wasm" : "Lean is loading the snapshot and starting the app");
-          } else if (m.type === "progress" && !at.downloaded) say(`downloading lean.wasm and the snapshot (the snapshot: ${MB(m.got)}${m.total ? " of " + MB(m.total) : ""} MB)`);
-          else if (m.type === "stopped") fail(new Error(m.message));
+      try {
+        const box = document.querySelector(selector);
+        if (!box) throw new Error("LeanUI: no element matches " + selector);
+        const say = (s) => { if (!rt.disposed && !rt.container) box.textContent = "Lean's interpreter on QED64: " + s + "…"; };
+        const worker = new Worker(file(cfg.worker));
+        const tr = new QedTransport(worker, rt);
+        if (rt.disposed) { tr.dispose(); throw tr.dead; }
+        rt.transport = tr;
+        // the start's milestones, on this page's clock (the Worker's are moved onto it)
+        const at = {};
+        let bytes = 0;
+        say("downloading lean.wasm and the snapshot");
+        if (rt.disposed) throw tr.dead;
+        const mount = new Promise((ok, no) => {
+          tr.rejectMount = no;
+          const fail = (err) => { tr.die(err); no(err); };
+          worker.onmessage = (e) => {
+            if (rt.disposed) return;
+            const m = e.data;
+            if (m.type === "reply" && !m.mount) tr.onReply(m);
+            else if (m.type === "reply") {
+              rt.busy = true;
+              try { tr.apply(m.updates); } catch (err) { return fail(err); } finally { rt.busy = false; }
+              at.applied = now(); bytes = m.bytes; ok();
+            } else if (m.type === "phase") {
+              at[m.name] = m.at - performance.timeOrigin;
+              if (m.name !== "mounted") say(m.name === "downloaded" ? "starting lean.wasm" : "Lean is loading the snapshot and starting the app");
+            } else if (m.type === "progress" && !at.downloaded) say(`downloading lean.wasm and the snapshot (the snapshot: ${MB(m.got)}${m.total ? " of " + MB(m.total) : ""} MB)`);
+            else if (m.type === "stopped") fail(new Error(m.message));
+          };
+          worker.onerror = (e) => { e.preventDefault(); if (!rt.disposed) fail(new Error("the Worker failed: " + (e.message || "(no message)"))); };
+          worker.postMessage({ type: "boot", leanJs: file(cfg.leanJs), leanWasm: file(cfg.leanWasm), core: file(cfg.core),
+            snapshot: file(cfg.snapshot), snapshotBytes: cfg.snapshotBytes, snapshotDeps: file(cfg.snapshotDeps), runFile: file(cfg.runFile),
+            app: cfg.app, selector, flags, pool: cfg.pool });
+        });
+        await mount;
+        tr.rejectMount = null;
+        if (rt.queue.length) { const [k, a, b, c, d] = rt.queue.shift(); rt.send(k, a, b, c, d); }
+        await tr.idle();
+        // the floor: what any message costs, an empty one's round trip (the median of 20)
+        const pings = [];
+        for (let i = 0; i < 20; i++) { const t = now(); tr.ping(); await tr.idle(); pings.push(now() - t); }
+        const ready = now();
+        tr.lane = {
+          bytes,
+          // the start, in order: the downloads (lean.wasm streams into its compiler meanwhile), the
+          // rest of the runtime's start (compiling, the pthreads, the files), Lean loading the snapshot
+          // and mounting the app, the mount's way here and onto the page, then the pings
+          phases: { download: at.downloaded - t0, runtime: at.runtime - at.downloaded, Lean: at.mounted - at.runtime,
+            DOM: at.applied - at.mounted, pings: ready - at.applied },
+          stats: () => ({ ...tr.totals, floorMs: median(pings) }),
         };
-        worker.onerror = (e) => { e.preventDefault(); fail(new Error("the Worker failed: " + (e.message || "(no message)"))); };
-      });
-      worker.postMessage({ type: "boot", leanJs: file(cfg.leanJs), leanWasm: file(cfg.leanWasm), core: file(cfg.core),
-        snapshot: file(cfg.snapshot), snapshotBytes: cfg.snapshotBytes, snapshotDeps: file(cfg.snapshotDeps), runFile: file(cfg.runFile),
-        app: cfg.app, selector, flags, pool: cfg.pool });
-      await mount;
-      if (rt.queue.length) { const [k, a, b, c, d] = rt.queue.shift(); rt.send(k, a, b, c, d); }
-      await tr.idle();
-      // the floor: what any message costs, an empty one's round trip (the median of 20)
-      const pings = [];
-      for (let i = 0; i < 20; i++) { const t = now(); tr.ping(); await tr.idle(); pings.push(now() - t); }
-      const ready = now();
-      tr.lane = {
-        bytes,
-        // the start, in order: the downloads (lean.wasm streams into its compiler meanwhile), the
-        // rest of the runtime's start (compiling, the pthreads, the files), Lean loading the snapshot
-        // and mounting the app, the mount's way here and onto the page, then the pings
-        phases: { download: at.downloaded - t0, runtime: at.runtime - at.downloaded, Lean: at.mounted - at.runtime,
-          DOM: at.applied - at.mounted, pings: ready - at.applied },
-        stats: () => ({ ...tr.totals, floorMs: median(pings) }),
-      };
-      rt.bootMs = ready - t0;
-      return rt;
+        rt.bootMs = ready - t0;
+        return rt;
+      } catch (e) {
+        rollback();
+        try { rt.dispose(); } catch (cleanup) { console.error("LeanUI: cleanup failed", cleanup); }
+        throw e;
+      } finally { rt.effects.signal.removeEventListener("abort", rollback); }
     },
     QedTransport,
   };

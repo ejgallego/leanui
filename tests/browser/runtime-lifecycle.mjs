@@ -8,6 +8,66 @@ const runtime = fs.readFileSync(new URL("../../runtime/leanui.js", import.meta.u
 const engines = process.argv.slice(2);
 if (!engines.length) engines.push("chromium", "firefox");
 const tests = [
+  ["in-flight delegation stops before ancestor payload extraction", () => {
+    document.querySelector("#app").innerHTML = '<div id="parent"><button id="child">drop</button></div>';
+    let calls = 0;
+    const rt = new LeanUI.Runtime({ isTerminalError() { return true; }, event() { calls++; throw new Error("terminal drop"); } });
+    rt.setContainer("#app"); LeanUI.active = rt; rt.delegate("drop");
+    document.querySelector("#child").__lui = { drop: [1, 5, 0] };
+    document.querySelector("#parent").__lui = { drop: [2, 5, 0] };
+    const transfer = new DataTransfer(); transfer.items.add(new File(["payload"], "file.bin"));
+    document.querySelector("#child").dispatchEvent(new DragEvent("drop", { bubbles: true, dataTransfer: transfer }));
+    return { disposed: rt.disposed, calls, files: rt.files.size };
+  }, { disposed: true, calls: 1, files: 0 }],
+  ["custom-element construction cannot restore disposed handle tables", () => {
+    const rows = [];
+    for (const mode of ["create", "template", "clone"]) {
+      const rt = new LeanUI.Runtime({});
+      const tag = "lifetime-" + mode;
+      let armed = false, disposals = 0;
+      customElements.define(tag, class extends HTMLElement {
+        constructor() { super(); if (armed) { disposals++; rt.dispose(); } }
+      });
+      const apply = (words, text = "") => {
+        const w = new Uint32Array(words), strings = new TextEncoder().encode(text);
+        const bytes = new Uint8Array(w.byteLength + strings.length);
+        bytes.set(new Uint8Array(w.buffer)); bytes.set(strings, w.byteLength);
+        rt.apply(bytes, 0, w.byteLength, w.byteLength, strings.length);
+      };
+      if (mode !== "create") { rt.nodes[1] = document.createElement(tag); rt.kinds[1] = 0; }
+      if (mode === "clone") apply([20, 0, 1, 1]);
+      armed = true;
+      if (mode === "create") apply([17, 1, 0, tag.length, 1, 1, 0, 1], tag);
+      else if (mode === "template") apply([20, 0, 1, 1]);
+      else apply([21, 0, 1, 2]);
+      rows.push({ disposed: rt.disposed, disposals, tables: [rt.nodes.length, rt.kinds.length, rt.names.length, rt.tpl.length] });
+    }
+    return rows;
+  }, [0, 1, 2].map(() => ({ disposed: true, disposals: 1, tables: [0, 0, 0, 0] }))],
+  ["custom property getters cannot write after disposing the owner", () => {
+    const rows = [];
+    for (const opcode of [5, 8]) {
+      const rt = new LeanUI.Runtime({}); let writes = 0;
+      const el = document.createElement("div");
+      Object.defineProperty(el, "probe", { get() { rt.dispose(); return "old"; }, set() { writes++; } });
+      rt.nodes[1] = el; rt.names[1] = "probe";
+      const words = new Uint32Array(opcode === 5 ? [5, 1, 1, 0, 0] : [8, 1, 1]);
+      rt.apply(new Uint8Array(words.buffer), 0, words.byteLength, words.byteLength, 0);
+      rows.push({ disposed: rt.disposed, writes });
+    }
+    return rows;
+  }, [{ disposed: true, writes: 0 }, { disposed: true, writes: 0 }]],
+  ["disconnected callback stops further removals", () => {
+    const rt = new LeanUI.Runtime({}); let armed = false, disconnected = 0;
+    customElements.define("lifetime-remove", class extends HTMLElement {
+      disconnectedCallback() { if (armed) { disconnected++; rt.dispose(); } }
+    });
+    const parent = document.querySelector("#app"), a = document.createElement("lifetime-remove"), b = document.createElement("lifetime-remove"), c = document.createElement("span");
+    parent.append(a, b, c); rt.nodes[1] = a; rt.nodes[2] = b; armed = true;
+    const words = new Uint32Array([12, 1, 12, 2]);
+    rt.apply(new Uint8Array(words.buffer), 0, words.byteLength, words.byteLength, 0);
+    return { disposed: rt.disposed, disconnected, remaining: parent.children.length, secondKept: b.parentNode === parent };
+  }, { disposed: true, disconnected: 1, remaining: 2, secondKept: true }],
   ["bitmap closes on every decode exit", async () => {
     const rows = [];
     for (const fail of ["context", "draw", "read", "none"]) {

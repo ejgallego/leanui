@@ -68,6 +68,17 @@ leaving if that is later, to its reply leaving), and the page applies the update
 stops (it exits, `lean.wasm` aborts, an update cannot be applied), `idle()` rejects, the container
 gets a `leanui:error` event and the Worker is terminated.
 
+The returned Runtime's `dispose()` is idempotent: it cancels browser effects, terminates the
+Worker and detaches its callbacks. Outstanding `idle()` operations and a pending Worker start
+reject with `AbortError`; intentional disposal emits no error event. Terminal Worker or DOM
+errors run that same cleanup and emit one `leanui:error` on the mounted container, preserving
+the original error for waiters. A failed start restores the previous live runtime owner;
+DOM changes already applied, including startup progress, are not rolled back.
+
+`node tests/browser/qed-lifecycle.mjs` tests the adapter's lifecycle in Chromium and Firefox
+using real Workers and a small protocol fixture, without downloading `lean.wasm` or the
+snapshot. The Node and race tests below qualify the actual Lean runtime and workloads.
+
 For the race (`bench/race/lanes.mjs`), the page sets `window.__idle` and `window.__lane` before
 `window.__ready`:
 
