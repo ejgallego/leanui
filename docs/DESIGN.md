@@ -83,6 +83,32 @@ built against. It was first written on 2026-10-18 from the research in
   wasm64 `libleanrt`, `libInit`, `libStd`, `libuv` from the fork pinned in `toolchain/fork.lock`
   plus `lean-wasm-threads.patch`; `tools/build-app.sh` links an app (`dist/<name>/`).
 
+### Browser lifetime
+
+The in-page Wasm callbacks use the single `LeanUI.active` slot; one active app per page is
+supported. Starting another app does not dispose the previous one. Call `dispose()` before
+replacing a running app. Startup is synchronous once the backend is loaded: it holds input
+until the initial output is applied, then drains queued input. A failed start disposes the new
+runtime and restores the previous live owner. If an error handler has installed a newer runtime,
+cleanup preserves that owner. This restores runtime ownership, not DOM changes already applied
+to a mount; failed startup is not a DOM transaction.
+
+`Runtime.dispose()` is idempotent. It stops event and callback delivery, aborts fetches, cancels
+owned timers and animation frames, removes listeners and revokes object URLs. Async operations
+that cannot be canceled may finish, but cannot deliver a result or acquire more runtime-owned
+resources. Temporary `ImageBitmap` and `VideoFrame` handles are closed on success and error.
+Disposal keeps the last rendered DOM; the caller owns removal of the mount.
+
+The transport reports `failed` when an update error is terminal. Wasm update errors are terminal;
+a recoverable transport error is logged and allows later input. Terminal errors dispose the
+runtime before emitting one `leanui:error` on its former container. An optional transport
+`dispose()` releases backend resources after browser work has stopped. Wasm drops its module
+reference (memory is reclaimed by JS garbage collection); a remote session expires on the
+server's normal timeout.
+
+`tests/browser/runtime-lifecycle.mjs` checks shared startup, disposal and async lifetime races
+without compiled apps in Chromium and Firefox.
+
 ## 2. Frozen interfaces (change only with a note in this file)
 
 - `LeanUI.Html` types and smart constructors; `LeanUI.Attr.*` helpers (additions allowed).
